@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>Mediciones Beacon</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- OJO: rutas relativas con ./ -->
+  <link rel="stylesheet" href="./css/styles.css" />
+</head>
+<body>
+  <h1>Registro de Mediciones</h1>
+
+  <div class="actions">
+    <button id="btn-cargar">Añadir última medición</button>
+    <button id="btn-vaciar" class="secondary">Vaciar tabla</button>
+
+    <label class="autorefresh">
+      <input type="checkbox" id="chk-auto" />
+      Auto (cada 5s)
+    </label>
+  </div>
+
+  <div id="msg" class="hidden"></div>
+
+  <table id="tabla-mediciones">
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Medición</th>
+        <th>Timestamp</th>
+      </tr>
+    </thead>
+    <tbody>
+      <!-- Fila placeholder para que veas algo aunque el JS falle -->
+      <tr class="placeholder"><td colspan="3">Esperando datos…</td></tr>
+    </tbody>
+  </table>
+
+  <footer>© 2025 Proyecto Biometría y Medioambiente</footer>
+
+  <!-- OJO: rutas relativas con ./ -->
+  <script src="./js/scripts.js"></script>
+</body>
+</html>

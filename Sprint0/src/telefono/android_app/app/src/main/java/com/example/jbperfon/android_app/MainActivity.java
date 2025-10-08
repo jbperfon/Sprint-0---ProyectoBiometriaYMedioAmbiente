@@ -32,11 +32,16 @@ public class MainActivity extends AppCompatActivity {
 
     private static final int CODIGO_PETICION_PERMISOS = 11223344;
 
+    private static final int REQ_ENABLE_BT = 1001;
     // --------------------------------------------------------------
     // --------------------------------------------------------------
     private BluetoothLeScanner elEscanner;
 
     private ScanCallback callbackDelEscaneo = null;
+
+    private TramaIBeacon ultimoBeacon = null;
+
+    private int ultimoRssi = 0;
 
     // --------------------------------------------------------------
     // --------------------------------------------------------------
@@ -181,6 +186,49 @@ public class MainActivity extends AppCompatActivity {
                 super.onScanResult(callbackType, resultado);
                 Log.d(ETIQUETA_LOG, "  buscarEsteDispositivoBTLE(): onScanResult() ");
                 mostrarInformacionDispositivoBTLE(resultado);
+                if (resultado.getScanRecord() != null && resultado.getScanRecord().getBytes() != null) {
+                    byte[] bytes = resultado.getScanRecord().getBytes();
+                    try {
+                        ultimoBeacon = new TramaIBeacon(bytes);  // <--- aquí creamos el objeto
+                        String json = construirJsonMedicion(ultimoBeacon, ultimoRssi);
+                        Log.d(ETIQUETA_LOG, "JSON de medición = " + json);
+
+                        //TESTS RÁPIDOS
+
+                        // Opción A: probar sin backend, con mock público (HTTPS)
+                        new LogicaFake().postMedicion(json, "https://httpbin.org", "/post");
+
+// Opción B: backend local FastAPI (emulador Android -> host)
+                        new LogicaFake().postMedicion(json, "http://10.236.32.34:8000", "/api/v1/mediciones");
+
+
+                        ultimoRssi = resultado.getRssi();
+
+                        Log.d(ETIQUETA_LOG, "iBeacon guardado -> " +
+                                "uuid=" + Utilidades.bytesToString(ultimoBeacon.getUUID()) +
+                                " major=" + Utilidades.bytesToInt(ultimoBeacon.getMajor()) +
+                                " minor=" + Utilidades.bytesToInt(ultimoBeacon.getMinor()) +
+                                " tx=" + ultimoBeacon.getTxPower() +
+                                " rssi=" + ultimoRssi);
+                        // (opcional) parar el escaneo al encontrarlo
+
+                        if (elEscanner != null) {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                if (ActivityCompat.checkSelfPermission(MainActivity.this, Manifest.permission.BLUETOOTH_SCAN)
+                                        == PackageManager.PERMISSION_GRANTED) {
+                                    elEscanner.stopScan(callbackDelEscaneo);
+                                }
+                            } else {
+                                elEscanner.stopScan(callbackDelEscaneo);
+                            }
+                        }
+
+                    } catch (Exception e) {
+                        Log.w(ETIQUETA_LOG, "Error creando TramaIBeacon: " + e.getMessage());
+                    }
+                } else {
+                    Log.d(ETIQUETA_LOG, "ScanRecord nulo: no se puede construir TramaIBeacon.");
+                }
             }
 
             @Override
@@ -237,7 +285,22 @@ public class MainActivity extends AppCompatActivity {
         this.elEscanner.startScan(filtros, ajustes, this.callbackDelEscaneo);
     } // ()
 
-
+    // --------------------------------------------------------------
+    // --------------------------------------------------------------
+// Convierte la trama iBeacon a un JSON sencillo de medición.
+// Usa el 'minor' como medida (puedes cambiarlo si quieres).
+    private String construirJsonMedicion(TramaIBeacon tib, int rssi) {
+        if (tib == null) return "{}";
+        try {
+            int medida = Utilidades.bytesToInt(tib.getMinor());
+            long ts = System.currentTimeMillis();
+            // JSON compacto (sin librerías externas)
+            return "{\"medida\":" + medida + ",\"rssi\":" + rssi + ",\"ts\":" + ts + "}";
+        } catch (Exception e) {
+            Log.w(ETIQUETA_LOG, "construirJsonMedicion(): error creando JSON: " + e.getMessage());
+            return "{}";
+        }
+    }
     // --------------------------------------------------------------
     // --------------------------------------------------------------
     private void detenerBusquedaDispositivosBTLE() {
@@ -304,11 +367,22 @@ public class MainActivity extends AppCompatActivity {
     private void inicializarBlueTooth() {
         Log.d(ETIQUETA_LOG, " inicializarBlueTooth(): obtenemos adaptador BT ");
 
-        BluetoothAdapter bta = BluetoothAdapter.getDefaultAdapter();
+        // Mejor vía: BluetoothManager (evita nulls en algunos dispositivos)
+        android.bluetooth.BluetoothManager bm =
+                (android.bluetooth.BluetoothManager) getSystemService(android.content.Context.BLUETOOTH_SERVICE);
 
-        Log.d(ETIQUETA_LOG, " inicializarBlueTooth(): habilitamos adaptador BT ");
+        BluetoothAdapter bta = (bm != null) ? bm.getAdapter() : BluetoothAdapter.getDefaultAdapter();
 
-        // ----> MOD: pedir permisos en vez de 'return' si faltan para enable() en 12+
+        if (bta == null) {
+            Log.e(ETIQUETA_LOG, " inicializarBlueTooth(): NO hay adaptador Bluetooth en este dispositivo/emulador");
+            // Aquí puedes mostrar un Toast si quieres
+            // Toast.makeText(this, "Este dispositivo no soporta Bluetooth", Toast.LENGTH_LONG).show();
+            return; // ← evita NPE
+        }
+
+        Log.d(ETIQUETA_LOG, " inicializarBlueTooth(): estado inicial, enabled=" + bta.isEnabled());
+
+        // Android 12+ necesita permisos antes de consultar ciertas APIs
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
                 ActivityCompat.requestPermissions(
@@ -316,29 +390,30 @@ public class MainActivity extends AppCompatActivity {
                         new String[]{ Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN },
                         CODIGO_PETICION_PERMISOS
                 );
-                // No hacemos return; dejamos que el usuario responda al diálogo primero
                 return;
             }
         }
 
-        bta.enable();
+        // En lugar de bta.enable() (deprecated / restringido), pide al usuario activarlo:
+        if (!bta.isEnabled()) {
+            Log.d(ETIQUETA_LOG, " inicializarBlueTooth(): Bluetooth APAGADO -> solicitamos activación");
+            android.content.Intent intent = new android.content.Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE);
+            startActivityForResult(intent, REQ_ENABLE_BT); // tras volver, seguimos
+            return;
+        }
 
-        Log.d(ETIQUETA_LOG, " inicializarBlueTooth(): habilitado =  " + bta.isEnabled() );
-
-        Log.d(ETIQUETA_LOG, " inicializarBlueTooth(): estado =  " + bta.getState() );
-
+        Log.d(ETIQUETA_LOG, " inicializarBlueTooth(): estado =  " + bta.getState());
         Log.d(ETIQUETA_LOG, " inicializarBlueTooth(): obtenemos escaner btle ");
 
         this.elEscanner = bta.getBluetoothLeScanner();
 
-        if ( this.elEscanner == null ) {
-            Log.d(ETIQUETA_LOG, " inicializarBlueTooth(): Socorro: NO hemos obtenido escaner btle  !!!!");
-
+        if (this.elEscanner == null) {
+            Log.w(ETIQUETA_LOG, " inicializarBlueTooth(): NO se pudo obtener el escáner BLE (¿emulador sin BLE?)");
+            return;
         }
 
-        Log.d(ETIQUETA_LOG, " inicializarBlueTooth(): voy a perdir permisos (si no los tuviera) !!!!");
+        Log.d(ETIQUETA_LOG, " inicializarBlueTooth(): voy a pedir permisos (si no los tuviera) !!!!");
 
-        // ----> MOD: pedir el grupo correcto de permisos según versión
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED
                     || ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
@@ -352,24 +427,20 @@ public class MainActivity extends AppCompatActivity {
                 Log.d(ETIQUETA_LOG, " inicializarBlueTooth(): ya tengo permisos BLE (12+)");
             }
         } else {
-            if (
-                    ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH) != PackageManager.PERMISSION_GRANTED
-                            || ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADMIN) != PackageManager.PERMISSION_GRANTED
-                            || ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED
-            )
-            {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH) != PackageManager.PERMISSION_GRANTED
+                    || ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADMIN) != PackageManager.PERMISSION_GRANTED
+                    || ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+
                 ActivityCompat.requestPermissions(
                         MainActivity.this,
                         new String[]{ Manifest.permission.BLUETOOTH, Manifest.permission.BLUETOOTH_ADMIN, Manifest.permission.ACCESS_FINE_LOCATION },
-                        CODIGO_PETICION_PERMISOS);
-            }
-            else {
+                        CODIGO_PETICION_PERMISOS
+                );
+            } else {
                 Log.d(ETIQUETA_LOG, " inicializarBlueTooth(): parece que YA tengo los permisos necesarios !!!!");
             }
         }
     } // ()
-
-
     // --------------------------------------------------------------
     // --------------------------------------------------------------
     @Override
@@ -380,8 +451,6 @@ public class MainActivity extends AppCompatActivity {
         Log.d(ETIQUETA_LOG, " onCreate(): empieza ");
 
         inicializarBlueTooth();
-
-        Log.d(ETIQUETA_LOG, " onCreate(): termina ");
 
     } // onCreate()
 
